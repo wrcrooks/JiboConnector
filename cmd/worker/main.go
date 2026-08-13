@@ -30,8 +30,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	client := jiboapi.NewClient(cfg.JiboAPIBaseURL)
-	notifier := notify.NoopNotifier{Logger: logger}
+	if cfg.JiboAPIKey == "" {
+		logger.Warn("JIBOCONNECTOR_JIBO_API_KEY is not set — every jibo-api call will be rejected with 401")
+	}
+	client := jiboapi.NewClient(cfg.JiboAPIBaseURL, cfg.JiboAPIKey)
+
+	var notifier notify.Notifier
+	if cfg.SESFromAddress != "" {
+		sesNotifier, err := notify.NewSESNotifier(ctx, cfg.AWSRegion, cfg.SESFromAddress)
+		if err != nil {
+			logger.Error("failed to set up SES notifier", "error", err)
+			os.Exit(1)
+		}
+		notifier = sesNotifier
+		logger.Info("using SES notifier", "region", cfg.AWSRegion, "fromAddress", cfg.SESFromAddress)
+	} else {
+		notifier = notify.NoopNotifier{Logger: logger}
+		logger.Warn("JIBOCONNECTOR_SES_FROM_ADDRESS is not set — using no-op notifier (logs only, sends nothing)")
+	}
 
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,
@@ -76,22 +92,67 @@ func runPollLoop(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Start from "now" rather than the beginning of time — on a fresh
+	// deploy this avoids notifying every contact about the entire existing
+	// photo backlog in one burst. This cursor lives only in memory: a
+	// restart re-checks from "now" again, so a photo captured in the
+	// seconds around a restart could in principle be missed. Durable
+	// tracking across restarts is a known open gap (see README).
+	lastSeenUnixMs := time.Now().UnixMilli()
+
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("poll loop stopping")
 			return
 		case <-ticker.C:
-			pollOnce(ctx, logger, client, notifier)
+			lastSeenUnixMs = pollOnce(ctx, logger, client, notifier, lastSeenUnixMs)
 		}
 	}
 }
 
-func pollOnce(ctx context.Context, logger *slog.Logger, client *jiboapi.Client, notifier notify.Notifier) {
-	// jiboapi.Client's list/lookup methods aren't implemented yet — see
-	// internal/jiboapi/client.go for what's still open.
-	logger.Info("poll tick (not yet wired to jibo-api)")
-	_ = ctx
-	_ = client
-	_ = notifier
+func pollOnce(
+	ctx context.Context,
+	logger *slog.Logger,
+	client *jiboapi.Client,
+	notifier notify.Notifier,
+	sinceUnixMs int64,
+) int64 {
+	media, err := client.ListRecentPersonTaggedMedia(ctx, sinceUnixMs)
+	if err != nil {
+		logger.Error("failed to list recent person-tagged media", "error", err)
+		return sinceUnixMs
+	}
+
+	nextCursor := sinceUnixMs
+	for _, item := range media {
+		if item.CreatedUnix > nextCursor {
+			nextCursor = item.CreatedUnix
+		}
+
+		contacts, err := client.PhotoContactsForPerson(ctx, item.PersonID)
+		if err != nil {
+			logger.Error("failed to look up photo contacts",
+				"personId", item.PersonID, "mediaPath", item.Path, "error", err)
+			continue
+		}
+
+		if len(contacts) == 0 {
+			logger.Info("no photo notification contacts configured for person",
+				"personId", item.PersonID, "mediaPath", item.Path)
+			continue
+		}
+
+		for _, contact := range contacts {
+			if err := notifier.Deliver(ctx, item, contact); err != nil {
+				logger.Error("failed to deliver photo notification",
+					"mediaPath", item.Path, "contactId", contact.ID, "error", err)
+				continue
+			}
+			logger.Info("delivered photo notification",
+				"mediaPath", item.Path, "personId", item.PersonID, "contactId", contact.ID)
+		}
+	}
+
+	return nextCursor
 }

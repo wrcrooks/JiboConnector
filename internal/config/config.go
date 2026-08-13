@@ -16,18 +16,35 @@ type Config struct {
 	// e.g. http://api:8080 inside the openjibo docker-compose network.
 	JiboAPIBaseURL string
 
+	// JiboAPIKey authenticates this worker to jibo-api's /api/connector/*
+	// endpoints (OpenJibo:Connector:ApiKey on the jibo-api side). Required —
+	// those endpoints reject every request without a matching bearer token.
+	JiboAPIKey string
+
 	// PollInterval controls how often the worker checks jibo-api for newly
 	// captured, person-tagged photos.
 	PollInterval time.Duration
 
 	// HealthAddr is the address the worker's health-check HTTP server binds to.
 	HealthAddr string
+
+	// AWSRegion is the region SES sends from, e.g. us-east-1.
+	AWSRegion string
+
+	// SESFromAddress is the SES-verified sender address for outgoing photo
+	// notification emails. If empty, the worker falls back to a no-op
+	// notifier (logs what it would send) instead of failing to start —
+	// useful for running the poll loop before SES is fully set up.
+	SESFromAddress string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
 		JiboAPIBaseURL: getEnv("JIBOCONNECTOR_JIBO_API_BASE_URL", "http://api:8080"),
+		JiboAPIKey:     getEnv("JIBOCONNECTOR_JIBO_API_KEY", ""),
 		HealthAddr:     getEnv("JIBOCONNECTOR_HEALTH_ADDR", ":8090"),
+		AWSRegion:      getEnv("JIBOCONNECTOR_AWS_REGION", "us-east-1"),
+		SESFromAddress: getEnv("JIBOCONNECTOR_SES_FROM_ADDRESS", ""),
 	}
 
 	pollSeconds, err := strconv.Atoi(getEnv("JIBOCONNECTOR_POLL_INTERVAL_SECONDS", "30"))
