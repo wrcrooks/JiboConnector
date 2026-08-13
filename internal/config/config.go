@@ -1,0 +1,47 @@
+// Package config loads JiboConnector's runtime settings from environment
+// variables, following the JIBOCONNECTOR_ prefix convention (mirroring
+// jibo-api's own OPENJIBO_ prefix) so both services' env files read
+// consistently side by side in docker-compose.
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+)
+
+type Config struct {
+	// JiboAPIBaseURL is the base URL of the jibo-api server this worker polls,
+	// e.g. http://api:8080 inside the openjibo docker-compose network.
+	JiboAPIBaseURL string
+
+	// PollInterval controls how often the worker checks jibo-api for newly
+	// captured, person-tagged photos.
+	PollInterval time.Duration
+
+	// HealthAddr is the address the worker's health-check HTTP server binds to.
+	HealthAddr string
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		JiboAPIBaseURL: getEnv("JIBOCONNECTOR_JIBO_API_BASE_URL", "http://api:8080"),
+		HealthAddr:     getEnv("JIBOCONNECTOR_HEALTH_ADDR", ":8090"),
+	}
+
+	pollSeconds, err := strconv.Atoi(getEnv("JIBOCONNECTOR_POLL_INTERVAL_SECONDS", "30"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing JIBOCONNECTOR_POLL_INTERVAL_SECONDS: %w", err)
+	}
+	cfg.PollInterval = time.Duration(pollSeconds) * time.Second
+
+	return cfg, nil
+}
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		return value
+	}
+	return fallback
+}
