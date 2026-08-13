@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.43.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.36
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.66.5
+	github.com/aws/aws-sdk-go-v2/service/sns v1.42.5
 )
 
 require (

@@ -35,19 +35,37 @@ func main() {
 	}
 	client := jiboapi.NewClient(cfg.JiboAPIBaseURL, cfg.JiboAPIKey)
 
-	var notifier notify.Notifier
+	var channels []notify.Notifier
+
 	if cfg.SESFromAddress != "" {
 		sesNotifier, err := notify.NewSESNotifier(ctx, cfg.AWSRegion, cfg.SESFromAddress)
 		if err != nil {
 			logger.Error("failed to set up SES notifier", "error", err)
 			os.Exit(1)
 		}
-		notifier = sesNotifier
-		logger.Info("using SES notifier", "region", cfg.AWSRegion, "fromAddress", cfg.SESFromAddress)
+		channels = append(channels, sesNotifier)
+		logger.Info("email notifications enabled via SES", "region", cfg.AWSRegion, "fromAddress", cfg.SESFromAddress)
 	} else {
-		notifier = notify.NoopNotifier{Logger: logger}
-		logger.Warn("JIBOCONNECTOR_SES_FROM_ADDRESS is not set — using no-op notifier (logs only, sends nothing)")
+		logger.Warn("JIBOCONNECTOR_SES_FROM_ADDRESS is not set — email notifications disabled")
 	}
+
+	if cfg.SMSEnabled {
+		snsNotifier, err := notify.NewSNSNotifier(ctx, cfg.AWSRegion)
+		if err != nil {
+			logger.Error("failed to set up SNS notifier", "error", err)
+			os.Exit(1)
+		}
+		channels = append(channels, snsNotifier)
+		logger.Info("SMS notifications enabled via SNS", "region", cfg.AWSRegion)
+	} else {
+		logger.Warn("JIBOCONNECTOR_SMS_ENABLED is not set — SMS notifications disabled")
+	}
+
+	if len(channels) == 0 {
+		channels = append(channels, notify.NoopNotifier{Logger: logger})
+		logger.Warn("no notification channels configured — using no-op notifier (logs only, sends nothing)")
+	}
+	notifier := notify.NewComposite(channels...)
 
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,

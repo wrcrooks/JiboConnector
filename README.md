@@ -12,18 +12,21 @@ When Jibo recognizes an enrolled person and (with their consent) takes a photo, 
 
 ## Status
 
-End-to-end for email; SMS not started.
+End-to-end for both email and SMS.
 
-- `cmd/worker/main.go` — poll loop on a timer, plus a `/health` HTTP endpoint. Each tick lists recently captured person-tagged media from `jibo-api`, looks up that person's notification contacts, and delivers to each. Tracks an in-memory high-water mark (see "Known gaps" below).
+- `cmd/worker/main.go` — poll loop on a timer, plus a `/health` HTTP endpoint. Each tick lists recently captured person-tagged media from `jibo-api`, looks up that person's notification contacts, and delivers to each over every enabled channel. Tracks an in-memory high-water mark (see "Known gaps" below — this is a deliberately accepted tradeoff, not an oversight).
 - `internal/config` — env-based config (`JIBOCONNECTOR_` prefix).
 - `internal/jiboapi` — client for `jibo-api`'s `/api/connector/media` and `/api/connector/loop-members/{personId}/photo-contacts` endpoints, authenticated with a shared-secret bearer token.
-- `internal/notify` — a `Notifier` interface. `SESNotifier` sends real email via Amazon SES (chosen for cost — negligible at household scale — and because AWS's standard credential chain means no bespoke secret handling in this repo). `NoopNotifier` (logs only) is used automatically if SES isn't configured. No SMS provider is wired up yet — `SESNotifier.Deliver` silently skips any contact that only has a phone number.
+- `internal/notify` — a `Notifier` interface, fanned out by `CompositeNotifier` so a contact with both an email and a phone number gets both:
+  - `SESNotifier` — email via Amazon SES. No-ops for a contact with no email.
+  - `SNSNotifier` — SMS via Amazon SNS. No-ops for a contact with no phone number; returns an error (visible in the poll loop's logs) if the number isn't in E.164 format (`+`-prefixed).
+  - `NoopNotifier` (logs only) is used automatically if neither channel is configured, so the worker still starts and polls even before notification config is finished.
+  - Both AWS notifiers use the SDK's standard credential chain — no bespoke secret handling in this repo.
 
 ### Known gaps
 
-- **No SMS provider chosen.** Contacts with only a phone number are silently skipped today.
-- **The "already processed" cursor is in-memory only.** It starts at "now" on every restart, so a restart could in principle miss a photo captured in the same instant. No persistent store has been added for this yet.
-- **No display name for the recognized person.** `jibo-api`'s connector endpoints only expose a person's id, not their name, so notification emails are generic ("Jibo took a new photo!") rather than personalized.
+- **The "already processed" cursor is in-memory only.** It starts at "now" on every restart, so a restart could in principle miss a photo captured in the same instant. Accepted for now — not planned as a near-term fix.
+- **No display name for the recognized person.** `jibo-api`'s connector endpoints only expose a person's id, not their name, so notification messages are generic ("Jibo took a new photo!") rather than personalized.
 
 ## Configuration
 
@@ -33,10 +36,11 @@ End-to-end for email; SMS not started.
 | `JIBOCONNECTOR_JIBO_API_KEY` | Bearer token for `jibo-api`'s `/api/connector/*` endpoints — must match `OpenJibo__Connector__ApiKey` on the `jibo-api` side | *(required — every call 401s without it)* |
 | `JIBOCONNECTOR_POLL_INTERVAL_SECONDS` | How often to check for new photos | `30` |
 | `JIBOCONNECTOR_HEALTH_ADDR` | Bind address for `/health` | `:8090` |
-| `JIBOCONNECTOR_AWS_REGION` | SES region | `us-east-1` |
-| `JIBOCONNECTOR_SES_FROM_ADDRESS` | SES-verified sender address | *(unset — falls back to a no-op notifier)* |
+| `JIBOCONNECTOR_AWS_REGION` | Region for both SES and SNS | `us-east-1` |
+| `JIBOCONNECTOR_SES_FROM_ADDRESS` | SES-verified sender address | *(unset — email disabled)* |
+| `JIBOCONNECTOR_SMS_ENABLED` | Turn on SMS via SNS | `false` — explicit opt-in, since (unlike SES) there's no required per-service value to gate on, and being able to send email shouldn't silently imply being willing to spend money on SMS |
 
-AWS credentials themselves aren't a JiboConnector setting — the SDK's standard chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, a shared credentials file, or an IAM role) handles that.
+AWS credentials themselves aren't a JiboConnector setting — the SDK's standard chain (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, a shared credentials file, or an IAM role) handles that. Both SES and SNS use the same chain.
 
 ## Build & run
 
@@ -52,6 +56,7 @@ docker build -t jibo-connector .
 docker run --rm -p 8090:8090 \
   -e JIBOCONNECTOR_JIBO_API_KEY=... \
   -e JIBOCONNECTOR_SES_FROM_ADDRESS=... \
+  -e JIBOCONNECTOR_SMS_ENABLED=true \
   -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
   jibo-connector
 ```

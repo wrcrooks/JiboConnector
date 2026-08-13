@@ -32,10 +32,15 @@ type Config struct {
 	AWSRegion string
 
 	// SESFromAddress is the SES-verified sender address for outgoing photo
-	// notification emails. If empty, the worker falls back to a no-op
-	// notifier (logs what it would send) instead of failing to start —
-	// useful for running the poll loop before SES is fully set up.
+	// notification emails. If empty, email delivery is skipped.
 	SESFromAddress string
+
+	// SMSEnabled turns on SMS delivery via Amazon SNS. Unlike SES there's no
+	// per-service required value (like a verified sender) to gate on, so
+	// this is an explicit opt-in rather than inferred from AWS credentials
+	// being present — being able to send email shouldn't silently imply
+	// being willing to spend money on SMS.
+	SMSEnabled bool
 }
 
 func Load() (Config, error) {
@@ -52,6 +57,12 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parsing JIBOCONNECTOR_POLL_INTERVAL_SECONDS: %w", err)
 	}
 	cfg.PollInterval = time.Duration(pollSeconds) * time.Second
+
+	smsEnabled, err := strconv.ParseBool(getEnv("JIBOCONNECTOR_SMS_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing JIBOCONNECTOR_SMS_ENABLED: %w", err)
+	}
+	cfg.SMSEnabled = smsEnabled
 
 	return cfg, nil
 }
